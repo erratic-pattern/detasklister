@@ -1,3 +1,7 @@
+# Local log output
+*.log
+
+# Perl build files
 !Build/
 .last_cover_stats
 /META.yml
