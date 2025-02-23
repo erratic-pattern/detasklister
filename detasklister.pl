@@ -41,7 +41,7 @@ my @issue_state_options = qw(open closed all);
 ### Variables for storing command-line options
 
 my $repo;
-my %repo_parts;    # Hash of host,owner,repo parts
+my %repo_parts;    # Hash ref of host,owner,repo parts
 my $interactive;
 my $all_issues;
 my $issue_state;
@@ -90,6 +90,20 @@ sub shell_escape {
 }
 
 # Create and write to a temp file
+#
+# Positional arguments:
+#   name        The "stub" name to use for generating the file.
+#               Filename will use the template "detasklister.$name.XXXXXXXXXX"
+#               Where X represents a random alphanumeric character.
+#
+#   contents    String of file contents to write to the file
+#
+# Additional hash of keyword arguments can be supplied which will be passed to the
+# `File::Temp::tempfile` function.
+#
+# Returns:
+#   ($fname, $fh)   The file name and file handle
+#
 sub write_temp {
     my ( $name, $contents, %args ) = @_;
     state $tmpdir = File::Spec->tmpdir();
@@ -101,6 +115,14 @@ sub write_temp {
 }
 
 # Display a diff to the user with the system `diff` command.
+#
+# Positional arguments:
+#   old     String to display as the "old" string#
+#   new     String to display as the "new string"
+# Keyword arguments:
+#   name    The "stub" file name to use for generating randomized temp file names.
+#           Filename will use the template "detasklister.$name.XXXXXXXXXX"
+#           Where X represents a random alphanumeric character.#
 sub show_diff {
     my ( $old, $new, %args ) = @_;
     $args{name} = "diff" unless defined $args{name};
@@ -115,22 +137,53 @@ sub show_diff {
 }
 
 # Parses the [HOST/]OWNER/REPO format
-sub parse_repo_opt {
-    my ( $opt_name, $opt_value ) = @_;
-    $opt_value =~ m'^
-            (?:(?<host>[^/]+)/)?
-            (?<owner>[^/]+)/
-            (?<repo>[^/]+)
-        $'x
-      or die "Expected the '[HOST]/OWNER/REPO' format, got '$opt_value'\n";
-    %repo_parts = %+;
-    $repo       = $opt_value;
+#
+# Returns:
+#   ($repo_name, %repo_parts)
+#   Where:
+#       $repo_name  is the entire repo string
+#       %repo_parts is a hash of host/owner/repo parts
+#
+#   Returns nothing when the string does not match.
+sub parse_repo {
+    ($_) = @_ if @_;
+    m'^
+    (?:(?<host>[^/]+)/)?
+    (?<owner>[^/]+)/
+    (?<repo>[^/]+)
+    $'x or return;
+    return ( $_, %+ );
 }
 
-# Parse an issue argument string and returns the number as a string
-sub parse_issue {
+### Parse issue number format (ex. 1234 or #1234) and return the issue number (1234), otherwise return nothing.
+sub parse_issue_number {
     ($_) = @_ if @_;
-    return $1 if m'^(?|#?(\d+)|https?://.+?/.+?/.+?/issues/(\d+)/?)$';
+    return $1 if m'^#?(\d+)$';
+}
+
+### Parse issue URL and return the issue number, otherwise return nothing.
+sub parse_issue_url {
+    ($_) = @_ if @_;
+    return $1 if m'^https?://.+?/.+?/.+?/issues/(\d+)/?$';
+}
+
+# Parse an issue argument string and returns ($issue_number, $issue_url)
+# Return nothing if parsing fails
+sub parse_issue {
+    my ($issue_input) = ( @_, $_ );
+
+    # return URL as-is
+    if ( my $issue_number = parse_issue_url $issue_input ) {
+        return ( $issue_number, $issue_input );
+    }
+
+    # otherwise parse issue number and construct url from command-line options
+    if ( my $issue_number = parse_issue_number $issue_input ) {
+        my ( $host, $owner, $repo ) = @repo_parts{qw( host owner repo )};
+        $host = "github.com" unless $host;
+        my $issue_url = "https://$host/$owner/$repo/issues/$issue_number";
+        return ( $issue_number, $issue_url );
+    }
 }
 
 ### Show help when there are no arguments
@@ -140,7 +193,11 @@ pod2usage(1) unless @ARGV;
 ### Parse command-line options
 
 GetOptions(
-    "repo|R=s"           => \&parse_repo_opt,
+    "repo|R=s" => sub {
+        my ( $opt_name, $opt_value ) = @_;
+        ( $repo, %repo_parts ) = parse_repo $opt_value
+          or die "Expected the '[HOST]/OWNER/REPO' format, got '$opt_value'\n";
+    },
     "interactive|i"      => \$interactive,
     "all-issues|A"       => \$all_issues,
     "issue-state|s=s"    => \$issue_state,
@@ -194,39 +251,31 @@ $num_context = 5     if !defined $num_context;
 # Prevents commands like `tee` from interfering with flush behavior
 STDOUT->autoflush(1) if $interactive;
 
-### Prepare common GH CLI options
-
-# construct --repo flag for `gh issue view` and `gh issue list` commands
-my $repo_opt = $repo ? "--repo @{[ shell_escape $repo ]}" : '';
-
 ### Prepare the list of issues to read/edit
 
-my @issue_names;
+my @issue_inputs;
 if ( !$all_issues ) {
-    @issue_names = @ARGV;
+    @issue_inputs = @ARGV;
 }
 else {
     # options for `gh issue list`
+    my $repo_opt = $repo ? "--repo @{[ shell_escape $repo ]}" : '';
     my $list_opts =
       "$repo_opt --json url --state $issue_state --limit 2147483647";
+
+    # run `gh issue list`
     my $cmd  = "gh issue list $list_opts";
     my $json = decode_json( run_cmd($cmd) );
-    @issue_names = map { $_->{url} } @$json;
+    @issue_inputs = map { $_->{url} } @$json;
 }
 
 ### Main view/edit loop
 
-foreach my $issue_name (@issue_names) {
+foreach my $issue_input (@issue_inputs) {
     ## Fetch the issues with GH CLI
-    my $issue_number = parse_issue $issue_name;
-    my $view_opts    = "--json 'url,body'";
-    if ($repo_opt) {
-        $view_opts .= " $repo_opt '$issue_number'";
-    }
-    else {
-        $view_opts .= " '$issue_name'";
-    }
-    my $issue = decode_json( run_cmd("gh issue view $view_opts") );
+    my ( $issue_number, $issue_url ) = parse_issue $issue_input;
+    my $view_opts = "--json 'url,body'";
+    my $issue = decode_json( run_cmd("gh issue view $view_opts '$issue_url'") );
     ## Search/Replace tasklist blocks
     my $body    = $issue->{body};
     my $changes = $body;
@@ -234,11 +283,11 @@ foreach my $issue_name (@issue_names) {
   TASKLIST_IN_ISSUE:
     while (
         $body =~ m' 
-            (?<outer>
-                ^\h*```\[tasklist\]\h*\r?\n
-                    (?<inner>.*?)
-                ```\h*\r?$
-            )
+        (?<outer>
+            ^\h*```\[tasklist\]\h*\r?\n
+            (?<inner>.*?)
+            ```\h*\r?$
+        )
         'xmsg
       )
     {
@@ -286,44 +335,41 @@ foreach my $issue_name (@issue_names) {
             elsif ( $choice eq 'q' ) { die "Quit\n"; }
             elsif ( $choice eq '?' ) {
                 print <<~'END';
-                    y - stage this change
-                    n - do not stage this change
-                    q - quit; do not stage this change or any remaining ones
-                    a - stage this change and all later changes in this issue
-                    d - do not stage this change or any of the later changes in this issue
-                    ? - print help
+                y - stage this change
+                n - do not stage this change
+                q - quit; do not stage this change or any remaining ones
+                a - stage this change and all later changes in this issue
+                d - do not stage this change or any of the later changes in this issue
+                ? - print help
                 END
                 goto PROMPT;    # mama mia that's some good spaghetti
             }
             else {
                 die <<~END;
-                    UNEXPECTED ERROR: received 'impossible' choice '$choice'
+                UNEXPECTED ERROR: received 'impossible' choice '$choice'
 
-                    Please report this as a bug :)
-                END
+                Please report this as a bug :)
+            END
             }
         }
     }
+
     if ( $body eq $changes ) {
-        say "No changes to make for $issue_name" if !$suppress_unchanged;
+        say "No changes to make for $issue_url" if !$suppress_unchanged;
         next;
     }
     my ($changes_name) = write_temp( "issue.$issue_number.changes", $changes );
-    my $edit_opts = "--body-file '$changes_name'";
-    if ($repo_opt) {
-        $edit_opts .= " $repo_opt '$issue_number'";
-    }
-    else {
-        $edit_opts .= " '$issue_name'";
-    }
-    my $cmd = "gh issue edit $edit_opts";
+    my $edit_opts      = "--body-file '$changes_name'";
+    my $cmd            = "gh issue edit $edit_opts '$issue_url'";
     if ($dry_run) {
-        say "DRY RUN >>> $cmd";
+        say "DRY RUN: Updating $issue_url...";
+        say "DRY RUN: >>> $cmd";
         show_diff( $body, $changes, name => "issue.$issue_number" );
+        say "DRY RUN: Updated $issue_url";
         next;
     }
-    say "Updating $issue_name...";
+    say "Updating $issue_url...";
     run_cmd $cmd;
-    say "Updated $issue_name\n";
+    say "Updated $issue_url";
 }
 
