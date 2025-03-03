@@ -1,6 +1,9 @@
 # Local log output
 *.log
 
+# Nix build files
+/result
+
 # Perl build files
 !Build/
 .last_cover_stats
