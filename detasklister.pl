@@ -82,6 +82,7 @@ sub run_cmd {
 # Returns:
 #   'don'"'"'t worry be happy'
 sub shell_escape {
+    @_ = ($_) unless @_;
     foreach (@_) {
         s/'/'"'"'/g;
         s/^|$/'/g;
@@ -291,7 +292,7 @@ foreach my $issue_input (@issue_inputs) {
         'xmsg
       )
     {
-        my ( $outer, $inner ) = @+{ 'outer', 'inner' };
+        my ( $outer, $inner ) = @+{qw(outer inner)};
 
         # Grab the context around the tasklist
         # This is done as a separate regex to avoid messing up the looping
@@ -346,10 +347,10 @@ foreach my $issue_input (@issue_inputs) {
             }
             else {
                 die <<~END;
-                UNEXPECTED ERROR: received 'impossible' choice '$choice'
+                UNEXPECTED ERROR: exited the interactive prompt loop with an invalid choice '$choice'
 
                 Please report this as a bug :)
-            END
+                END
             }
         }
     }
